@@ -208,7 +208,15 @@ private:
     }
 
     void init_subscribers() {
-        RCLCPP_INFO(this->get_logger(), "Initializing ROS2 subscribers...");
+        RCLCPP_INFO(this->get_logger(), "Initializing ROS2 subscribers with parallel callback groups...");
+        
+        // 创建独立的回调组，实现真正的并行处理
+        // 每个高频回调使用独立的 MutuallyExclusiveCallbackGroup
+        rgb_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        slam_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        vive_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        tof_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+        clamp_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         
         // QoS 配置
         auto qos_rgb = rclcpp::QoS(rclcpp::KeepLast(1))
@@ -220,24 +228,42 @@ private:
         auto qos_tof = rclcpp::QoS(rclcpp::KeepLast(5))
             .reliability(rclcpp::ReliabilityPolicy::Reliable);
         
+        // 订阅选项：指定回调组
+        rclcpp::SubscriptionOptions rgb_options;
+        rgb_options.callback_group = rgb_cb_group_;
+        
+        rclcpp::SubscriptionOptions slam_options;
+        slam_options.callback_group = slam_cb_group_;
+        
+        rclcpp::SubscriptionOptions vive_options;
+        vive_options.callback_group = vive_cb_group_;
+        
+        rclcpp::SubscriptionOptions tof_options;
+        tof_options.callback_group = tof_cb_group_;
+        
+        rclcpp::SubscriptionOptions clamp_options;
+        clamp_options.callback_group = clamp_cb_group_;
+        
         // 构建话题名称
         std::string rgb_topic = "/xv_sdk/" + xv_serial_ + "/rgb/image";
         std::string slam_topic = "/xv_sdk/" + xv_serial_ + "/pose";
         std::string tof_topic = "/xv_sdk/" + xv_serial_ + "/rgbPointCloud";
         std::string clamp_topic = "/xv_sdk/" + xv_serial_ + "/clamp";
         
-        RCLCPP_INFO(this->get_logger(), "  RGB topic: %s", rgb_topic.c_str());
-        RCLCPP_INFO(this->get_logger(), "  SLAM topic: %s", slam_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "  RGB topic: %s (parallel)", rgb_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "  SLAM topic: %s (parallel)", slam_topic.c_str());
         
-        // 创建订阅器
+        // 创建订阅器（带独立回调组）
         rgb_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             rgb_topic, qos_rgb,
-            std::bind(&FastCollectorNode::rgb_callback, this, std::placeholders::_1)
+            std::bind(&FastCollectorNode::rgb_callback, this, std::placeholders::_1),
+            rgb_options
         );
         
         slam_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             slam_topic, qos_pose,
-            std::bind(&FastCollectorNode::slam_callback, this, std::placeholders::_1)
+            std::bind(&FastCollectorNode::slam_callback, this, std::placeholders::_1),
+            slam_options
         );
         
         // Vive 订阅
@@ -245,31 +271,34 @@ private:
             std::string vive_serial_safe = vive_serial_;
             std::replace(vive_serial_safe.begin(), vive_serial_safe.end(), '-', '_');
             std::string vive_topic = "/vive/" + vive_serial_safe + "/pose";
-            RCLCPP_INFO(this->get_logger(), "  Vive topic: %s", vive_topic.c_str());
+            RCLCPP_INFO(this->get_logger(), "  Vive topic: %s (parallel)", vive_topic.c_str());
             
             vive_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
                 vive_topic, qos_pose,
-                std::bind(&FastCollectorNode::vive_callback, this, std::placeholders::_1)
+                std::bind(&FastCollectorNode::vive_callback, this, std::placeholders::_1),
+                vive_options
             );
         }
         
         // ToF 订阅
         if (enable_tof_) {
-            RCLCPP_INFO(this->get_logger(), "  ToF topic: %s", tof_topic.c_str());
+            RCLCPP_INFO(this->get_logger(), "  ToF topic: %s (parallel)", tof_topic.c_str());
             tof_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 tof_topic, qos_tof,
-                std::bind(&FastCollectorNode::tof_callback, this, std::placeholders::_1)
+                std::bind(&FastCollectorNode::tof_callback, this, std::placeholders::_1),
+                tof_options
             );
         }
         
         // Clamp 订阅
-        RCLCPP_INFO(this->get_logger(), "  Clamp topic: %s", clamp_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "  Clamp topic: %s (parallel)", clamp_topic.c_str());
         clamp_sub_ = this->create_subscription<xv_ros2_msgs::msg::Clamp>(
             clamp_topic, qos_rgb,
-            std::bind(&FastCollectorNode::clamp_callback, this, std::placeholders::_1)
+            std::bind(&FastCollectorNode::clamp_callback, this, std::placeholders::_1),
+            clamp_options
         );
         
-        RCLCPP_INFO(this->get_logger(), "ROS2 subscribers initialized");
+        RCLCPP_INFO(this->get_logger(), "ROS2 subscribers initialized with 5 parallel callback groups");
     }
 
     // 回调函数
@@ -528,6 +557,13 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr vive_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr tof_sub_;
     rclcpp::Subscription<xv_ros2_msgs::msg::Clamp>::SharedPtr clamp_sub_;
+    
+    // 回调组 - 实现并行回调
+    rclcpp::CallbackGroup::SharedPtr rgb_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr slam_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr vive_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr tof_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr clamp_cb_group_;
     
     std::atomic<RecordingState> state_;
     std::atomic<uint32_t> rgb_frame_index_;
