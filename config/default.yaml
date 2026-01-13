@@ -13,8 +13,12 @@ fast_data_collector:
     enable_vive: true       # 是否启用 Vive 追踪
     
     # 图像压缩
-    use_jpeg_compression: true  # 是否使用 JPEG 压缩（推荐开启以减少 IPC 带宽）
-    jpeg_quality: 95            # JPEG 压缩质量 (1-100)
+    # IPC 通信推荐关闭 JPEG 压缩：
+    # - IPC 带宽足够（内存速度）
+    # - 压缩/解压增加 CPU 开销
+    # - 避免双重处理（C++ 压缩 + Python 解压）
+    use_jpeg_compression: false  # IPC 模式推荐 false
+    jpeg_quality: 95             # JPEG 压缩质量 (1-100)，仅 TCP 模式使用
     
     # 录制限制
     max_rgb_count: 1800     # 最大 RGB 帧数，达到后自动停止

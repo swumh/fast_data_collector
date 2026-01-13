@@ -22,6 +22,7 @@
 #include <mutex>
 #include <vector>
 #include <iostream>
+#include <thread>
 
 #include "fast_data_collector/zmq_publisher.hpp"
 
@@ -364,11 +365,12 @@ private:
     }
 
     // 发送函数
+    // 注意：使用局部缓冲区避免多线程回调的数据竞争
     void send_rgb_frame(const sensor_msgs::msg::Image::SharedPtr& msg) {
         double timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
         uint32_t frame_index = rgb_frame_index_++;
         
-        RgbFrameMeta meta;
+        fast_data_collector::RgbFrameMeta meta;
         meta.width = msg->width;
         meta.height = msg->height;
         meta.frame_index = frame_index;
@@ -377,14 +379,19 @@ private:
         const uint8_t* image_data = nullptr;
         size_t image_size = 0;
         
+        // 使用局部缓冲区，避免多线程竞争
+        std::vector<uint8_t> local_jpeg_buffer;
+        std::vector<uint8_t> local_send_buffer;
+        
         if (use_jpeg_compression_) {
             try {
+                // cv_bridge::toCvShare 是零拷贝的，不会造成额外开销
                 cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(msg, "bgr8");
                 std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
-                cv::imencode(".jpg", cv_ptr->image, jpeg_buffer_, params);
+                cv::imencode(".jpg", cv_ptr->image, local_jpeg_buffer, params);
                 
-                image_data = jpeg_buffer_.data();
-                image_size = jpeg_buffer_.size();
+                image_data = local_jpeg_buffer.data();
+                image_size = local_jpeg_buffer.size();
                 meta.encoding = 2;  // JPEG
             } catch (const cv_bridge::Exception& e) {
                 RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -392,28 +399,29 @@ private:
                 return;
             }
         } else {
+            // 不压缩：直接使用原始图像数据（IPC 通信推荐）
             image_data = msg->data.data();
             image_size = msg->data.size();
             meta.encoding = (msg->encoding == "bgr8") ? 0 : 1;
         }
         
-        MessageHeader header;
-        header.type = static_cast<uint8_t>(MessageType::RGB_FRAME);
+        fast_data_collector::MessageHeader header;
+        header.type = static_cast<uint8_t>(fast_data_collector::MessageType::RGB_FRAME);
         header.timestamp_ns = static_cast<uint64_t>(timestamp * 1e9);
         header.seq = frame_index;
-        header.data_size = sizeof(RgbFrameMeta) + image_size;
+        header.data_size = sizeof(fast_data_collector::RgbFrameMeta) + image_size;
         
-        size_t total_size = sizeof(MessageHeader) + sizeof(RgbFrameMeta) + image_size;
-        send_buffer_.resize(total_size);
+        size_t total_size = sizeof(fast_data_collector::MessageHeader) + sizeof(fast_data_collector::RgbFrameMeta) + image_size;
+        local_send_buffer.resize(total_size);
         
-        uint8_t* ptr = send_buffer_.data();
-        std::memcpy(ptr, &header, sizeof(MessageHeader));
-        ptr += sizeof(MessageHeader);
-        std::memcpy(ptr, &meta, sizeof(RgbFrameMeta));
-        ptr += sizeof(RgbFrameMeta);
+        uint8_t* ptr = local_send_buffer.data();
+        std::memcpy(ptr, &header, sizeof(fast_data_collector::MessageHeader));
+        ptr += sizeof(fast_data_collector::MessageHeader);
+        std::memcpy(ptr, &meta, sizeof(fast_data_collector::RgbFrameMeta));
+        ptr += sizeof(fast_data_collector::RgbFrameMeta);
         std::memcpy(ptr, image_data, image_size);
         
-        if (!rgb_publisher_->send(send_buffer_)) {
+        if (!rgb_publisher_->send(local_send_buffer)) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                                  "Failed to send RGB frame %u", frame_index);
         }
@@ -612,12 +620,31 @@ int main(int argc, char** argv) {
     std::cout << "Recording... Press Ctrl+C to stop." << std::endl;
     
     try {
-        executor.spin();
+        // 使用 spin_some 循环，检查录制状态
+        // 当达到 max_rgb_count 或收到中断信号时退出
+        while (rclcpp::ok()) {
+            executor.spin_some();
+            
+            // 检查是否已停止录制（达到 max_rgb_count）
+            if (node->get_state() != fast_data_collector::RecordingState::RECORDING) {
+                // 给 Python 端一点时间处理最后的数据
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                break;
+            }
+            
+            // 短暂休眠，避免 CPU 空转
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
     }
     
-    node->stop_recording();
+    // 确保发送停止信号（如果是 Ctrl+C 退出）
+    if (node->get_state() == fast_data_collector::RecordingState::RECORDING) {
+        node->stop_recording();
+    }
+    
+    std::cout << "\nC++ 节点退出" << std::endl;
     rclcpp::shutdown();
     
     return 0;
