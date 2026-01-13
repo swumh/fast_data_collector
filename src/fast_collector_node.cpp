@@ -606,13 +606,27 @@ int main(int argc, char** argv) {
     
     auto node = std::make_shared<fast_data_collector::FastCollectorNode>();
     
+    // 声明参数
+    node->declare_parameter("auto_start", false);
+    bool auto_start = node->get_parameter("auto_start").as_bool();
+    
     std::cout << "\n========================================" << std::endl;
     std::cout << "FastUMI C++ Data Collector" << std::endl;
     std::cout << "========================================" << std::endl;
-    std::cout << "Press ENTER to start recording..." << std::endl;
-    std::cin.get();
     
-    node->start_recording();
+    if (auto_start) {
+        std::cout << "Auto start enabled. Recording starting..." << std::endl;
+        node->start_recording();
+    } else {
+        std::cout << "Press ENTER to start recording..." << std::endl;
+        // 清空输入缓冲
+        std::cin.clear();
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        // 等待回车
+        std::string dummy;
+        std::getline(std::cin, dummy);
+        node->start_recording();
+    }
     
     rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(node);

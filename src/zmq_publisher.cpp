@@ -29,10 +29,10 @@ ZmqPublisher::ZmqPublisher(const std::string& endpoint)
     int linger = 0;  // 关闭时不等待
     zmq_setsockopt(socket_, ZMQ_LINGER, &linger, sizeof(linger));
     
-    int sndhwm = 100;  // 发送高水位标记
+    int sndhwm = 1000;  // 发送高水位标记 (增加缓冲区深度)
     zmq_setsockopt(socket_, ZMQ_SNDHWM, &sndhwm, sizeof(sndhwm));
     
-    int sndbuf = 1024 * 1024 * 64;  // 64MB 发送缓冲区
+    int sndbuf = 1024 * 1024 * 128;  // 128MB 发送缓冲区
     zmq_setsockopt(socket_, ZMQ_SNDBUF, &sndbuf, sizeof(sndbuf));
     
     // 绑定到端点
